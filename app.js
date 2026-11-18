@@ -108,12 +108,26 @@
     notes: [],
     editing: false,
     onlyOpen: true,
+    // Prototype state. `proto` switches between the original desk and the
+    // changed check-in flow; both read and write the same loan records.
+    proto: true,
+    checkin: "",
+    find: "",
     notice: "Sample shift · All records are fictional.",
   });
   let s = original();
   const getAsset = (id) => assets.find((x) => x.id === id);
   const getReq = (id) => requests.find((x) => x.id === id);
   const out = (id) => s.loans.find((l) => l.asset === id && !l.back);
+  // Who physically has the unit now. `who` stays the person who signed it out.
+  const holder = (l) => l.holder || l.who;
+  const dueOptions = ["Fri 8 pm", "Sat 9 am", "Sat 10 am", "Sat noon"];
+  const dueRank = { "Fri 8 pm": 1, "Sat 9 am": 2, "Sat 10 am": 3, "Sat noon": 4 };
+  const nowRank = [0.5, 0.9, 2]; // Fri 3:45 pm, Fri 7:30 pm, Sat 9:00 am
+  const timing = (l) => {
+    const d = dueRank[l.due] - nowRank[s.phase];
+    return d < 0 ? "Overdue" : d === 0 ? "Due now" : "";
+  };
   const esc = (x) =>
     String(x).replace(
       /[&<>"']/g,
@@ -178,10 +192,18 @@
         "</p><p><b>Return by</b> " +
         r.due +
         "</p><p><b>Approved equipment</b></p><ul>" +
-        r.items.map((x) => "<li>" + x + "</li>").join("") +
+        r.items
+          .map((x) => "<li>" + x + (s.proto ? kitLine(r.id, x) : "") + "</li>")
+          .join("") +
         "</ul><p>" +
         r.note +
-        "</p></div>";
+        "</p>" +
+        (s.proto && s.loans.some((l) => l.req === r.id && !l.back)
+          ? '<div class="buttons">' +
+            btn("Check in this kit", "checkin", r.id, "primary") +
+            "</div>"
+          : "") +
+        "</div>";
     } else
       html += requests
         .map((r) =>
@@ -220,7 +242,178 @@
     }
     return html;
   }
+  // One line per approved item on the request form: where that item is now.
+  function kitLine(reqId, type) {
+    const l = s.loans
+      .filter((x) => x.req === reqId && getAsset(x.asset).type === type)
+      .pop();
+    if (!l) return " " + badge("Not issued");
+    if (l.back) return " " + badge(l.asset + " returned · L-" + l.num, true);
+    return (
+      " " +
+      badge(
+        l.asset +
+          " with " +
+          holder(l) +
+          " · expected " +
+          l.due +
+          " · L-" +
+          l.num,
+      ) +
+      (timing(l) ? " " + flag(timing(l)) : "")
+    );
+  }
+  const flag = (t) => '<span class="tag late">' + esc(t) + "</span>";
+  function slipRow(l) {
+    const a = getAsset(l.asset);
+    const custody =
+      holder(l) === l.who
+        ? "With " + l.who
+        : "With " + holder(l) + " · collected by " + l.who;
+    const log = (l.log || [])
+      .map(
+        (e) =>
+          '<small class="log">' +
+          esc(shifts[e.phase].time + " · " + e.text) +
+          "</small>",
+      )
+      .join("");
+    return (
+      '<div class="row"><div><strong>' +
+      esc("L-" + l.num + " · " + l.asset + " · " + a.type) +
+      "</strong><small>" +
+      esc(
+        l.back
+          ? "Returned · was with " + holder(l)
+          : custody + " · Expected " + l.due,
+      ) +
+      "</small>" +
+      log +
+      "</div><div>" +
+      (l.back ? badge("Returned", true) : timing(l) ? flag(timing(l)) : "") +
+      "</div></div>"
+    );
+  }
+  function checkinForm(r) {
+    const open = s.loans.filter((l) => l.req === r.id && !l.back);
+    let html =
+      '<form data-checkin="' +
+      esc(r.id) +
+      '"><div class="record"><small>' +
+      esc(r.id + " · " + r.club) +
+      "</small><h3>Check in · " +
+      esc(r.event) +
+      "</h3><p>Read the label on each unit at the counter. Anything not back stays on its slip with who has it now and when it’s expected.</p></div>" +
+      '<div class="form"><label><span>Brought back by</span><select name="by" required><option value="">Select…</option>' +
+      opts(people.map((p) => [p, p])) +
+      "</select></label></div>";
+    for (const l of open) {
+      const type = getAsset(l.asset).type;
+      const same = assets.filter((a) => a.type === type);
+      html +=
+        '<fieldset class="unit" data-slip="' +
+        l.num +
+        '"><legend>' +
+        esc("L-" + l.num + " · " + type) +
+        " <small>" +
+        esc("signed out to " + l.who + " · now with " + holder(l)) +
+        '</small></legend><div class="form"><label><span>Label on the unit at the counter</span><select name="unit-' +
+        l.num +
+        '" data-unit required><option value="">Select…</option>' +
+        opts(same.map((a) => [a.id, a.id + " · " + a.model])) +
+        '<option value="out">Not back yet</option></select></label>' +
+        '<div class="stillout" hidden><label><span>Who has it now</span><select name="holder-' +
+        l.num +
+        '"><option value="">Select…</option>' +
+        opts(people.map((p) => [p, p])) +
+        '</select></label><label><span>Expected back</span><select name="due-' +
+        l.num +
+        '"><option value="">Select…</option>' +
+        opts(dueOptions.map((d) => [d, d])) +
+        "</select></label></div></div></fieldset>";
+    }
+    return (
+      html +
+      '<p class="formerror" role="alert" data-formerror></p><div class="buttons"><button type="submit" class="primary">Save check-in</button>' +
+      btn("Cancel", "cancelcheckin") +
+      "</div></form>"
+    );
+  }
+  function registerProto() {
+    if (s.checkin) {
+      const r = getReq(s.checkin);
+      return (
+        head("Loan register", "Check in a kit · one decision per unit") +
+        checkinForm(r)
+      );
+    }
+    let html = head(
+      "Loan register",
+      "Grouped by request · who has each unit now",
+      s.editing
+        ? btn("Cancel", "cancel")
+        : btn("New issue slip", "new", "", "primary"),
+    );
+    if (s.editing) return registerOriginal();
+    html +=
+      '<div class="buttons"><label class="find"><span class="sr">Find</span><input type="search" data-find placeholder="Find a person, unit or request" value="' +
+      esc(s.find) +
+      '" /></label>' +
+      ["Outstanding", "All slips"]
+        .map(
+          (v, i) =>
+            '<button type="button" data-action="scope" data-val="' +
+            i +
+            '" aria-pressed="' +
+            (s.onlyOpen === (i === 0)) +
+            '">' +
+            v +
+            "</button>",
+        )
+        .join("") +
+      "</div>";
+    const needle = s.find.trim().toLowerCase();
+    const matches = (l) => {
+      if (!needle) return true;
+      const r = getReq(l.req);
+      return [
+        "L-" + l.num,
+        l.asset,
+        getAsset(l.asset).type,
+        l.who,
+        holder(l),
+        l.req,
+        r.club,
+        r.event,
+      ].some((x) => x.toLowerCase().includes(needle));
+    };
+    const shown = s.loans.filter((l) => (!s.onlyOpen || !l.back) && matches(l));
+    if (!shown.length)
+      html += "<p>" + (needle ? "No slips match." : "No outstanding slips.") + "</p>";
+    const reqIds = [...new Set(shown.map((l) => l.req))].sort();
+    for (const id of reqIds) {
+      const r = getReq(id);
+      const anyOpen = s.loans.some((l) => l.req === id && !l.back);
+      html +=
+        '<div class="group"><div class="grouphead"><div><strong>' +
+        esc(r.id + " · " + r.club) +
+        "</strong><small>" +
+        esc(r.event) +
+        "</small></div>" +
+        (anyOpen ? btn("Check in", "checkin", id, "primary") : "") +
+        "</div>" +
+        shown
+          .filter((l) => l.req === id)
+          .map(slipRow)
+          .join("") +
+        "</div>";
+    }
+    return html;
+  }
   function register() {
+    return s.proto ? registerProto() : registerOriginal();
+  }
+  function registerOriginal() {
     let html = head(
       "Loan register",
       "One slip per physical unit",
@@ -318,7 +511,11 @@
         "I brought the projector and speaker. Leela Das has our adapter. She’ll be at the counter at 9 am tomorrow.",
       ]);
     for (const n of s.notes)
-      entries.push([shifts[n.phase].time, "Counter handover", n.text]);
+      entries.push([
+        shifts[n.phase].time,
+        n.author || "Counter handover",
+        n.text,
+      ]);
     for (const [t, author, body] of entries.slice().reverse())
       html +=
         '<article class="record"><small>' +
@@ -361,6 +558,23 @@
           "</button>",
       )
       .join("");
+    q("[data-mode]").innerHTML =
+      '<span>Desk version</span>' +
+      [
+        ["0", "Original"],
+        ["1", "With my change"],
+      ]
+        .map(
+          ([v, t]) =>
+            '<button type="button" data-action="mode" data-val="' +
+            v +
+            '" aria-pressed="' +
+            (s.proto === (v === "1")) +
+            '">' +
+            t +
+            "</button>",
+        )
+        .join("");
     q("[data-page]").innerHTML = screens[s.tab]();
     if (q("[data-filter]")) q("[data-filter]").value = s.filter;
     q("[data-status]").textContent = s.notice;
@@ -380,8 +594,28 @@
     if (!b) return;
     const v = b.dataset.val;
     switch (b.dataset.action) {
-      case "restart":
+      case "restart": {
+        const proto = s.proto;
         s = original();
+        s.proto = proto;
+        break;
+      }
+      case "mode":
+        s.proto = v === "1";
+        s.checkin = "";
+        s.editing = false;
+        s.notice = s.proto
+          ? "Showing the desk with my change. Same records."
+          : "Showing the original desk. Same records.";
+        break;
+      case "checkin":
+        s.tab = "Loan register";
+        s.selected = "";
+        s.editing = false;
+        s.checkin = v;
+        break;
+      case "cancelcheckin":
+        s.checkin = "";
         break;
       case "advance":
         if (s.phase < 2) s.phase++;
@@ -390,6 +624,7 @@
       case "tab":
         s.tab = v;
         s.editing = false;
+        s.checkin = "";
         break;
       case "close":
         s.selected = "";
@@ -421,11 +656,132 @@
       s.filter = e.target.value;
       commit();
     }
+    if (e.target.matches("[data-unit]")) {
+      const box = e.target.closest("fieldset").querySelector(".stillout");
+      box.hidden = e.target.value !== "out";
+      box
+        .querySelectorAll("select")
+        .forEach((x) => (x.required = e.target.value === "out"));
+    }
   });
+  root.addEventListener("input", (e) => {
+    if (!e.target.matches("[data-find]")) return;
+    s.find = e.target.value;
+    commit();
+    const el = q("[data-find]");
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  });
+  function saveCheckin(f, form) {
+    const r = getReq(f.dataset.checkin);
+    const fail = (msg) => {
+      f.querySelector("[data-formerror]").textContent = msg;
+      q("[data-status]").textContent = msg;
+    };
+    const by = form.get("by");
+    if (!people.includes(by)) return fail("Choose who brought the kit back.");
+    const open = s.loans.filter((l) => l.req === r.id && !l.back);
+    const plan = [];
+    // Validate every unit before changing anything, so a wrong label never
+    // leaves the kit half checked in.
+    for (const l of open) {
+      const got = form.get("unit-" + l.num);
+      const type = getAsset(l.asset).type;
+      if (got === "out") {
+        const who = form.get("holder-" + l.num),
+          due = form.get("due-" + l.num);
+        if (!people.includes(who) || !dueRank[due])
+          return fail(
+            "L-" + l.num + ": say who has the " + type + " now and when it’s expected.",
+          );
+        plan.push({ l, back: false, who, due });
+      } else if (got === l.asset) plan.push({ l, back: true });
+      else if (getAsset(got)) {
+        const other = out(got);
+        return fail(
+          other
+            ? got +
+                " is on a different loan (L-" +
+                other.num +
+                ", " +
+                other.req +
+                "). L-" +
+                l.num +
+                " is for " +
+                l.asset +
+                ". Check the label again."
+            : got +
+                " isn’t out on any slip. L-" +
+                l.num +
+                " is for " +
+                l.asset +
+                ". Check the label again. If it really reads " +
+                got +
+                ", keep L-" +
+                l.num +
+                " open and look for " +
+                l.asset +
+                ".",
+        );
+      } else return fail("L-" + l.num + ": choose what’s at the counter.");
+    }
+    const returned = [],
+      still = [];
+    for (const p of plan) {
+      p.l.log = p.l.log || [];
+      if (p.back) {
+        p.l.back = true;
+        p.l.log.push({ phase: s.phase, text: "Returned by " + by + ", label checked" });
+        returned.push(p.l.asset);
+      } else {
+        const was = holder(p.l) + ", due " + p.l.due;
+        if (holder(p.l) !== p.who || p.l.due !== p.due)
+          p.l.log.push({
+            phase: s.phase,
+            text:
+              "Not back with the kit. Now with " +
+              p.who +
+              ", expected " +
+              p.due +
+              " (was " +
+              was +
+              ")",
+          });
+        if (p.who === p.l.who) delete p.l.holder;
+        else p.l.holder = p.who;
+        p.l.due = p.due;
+        still.push(
+          p.l.asset +
+            " " +
+            getAsset(p.l.asset).type +
+            " with " +
+            p.who +
+            ", expected " +
+            p.due +
+            " (slip L-" +
+            p.l.num +
+            ")",
+        );
+      }
+    }
+    const summary =
+      r.id +
+      " check-in: " +
+      by +
+      " returned " +
+      (returned.join(", ") || "nothing") +
+      ". " +
+      (still.length ? "Still out: " + still.join("; ") + "." : "Kit complete.");
+    s.notes.push({ phase: s.phase, text: summary, author: "Loan register · " + r.id });
+    s.checkin = "";
+    s.find = "";
+    commit(summary);
+  }
   root.addEventListener("submit", (e) => {
     e.preventDefault();
     const f = e.target;
     const form = new FormData(f);
+    if (f.matches("[data-checkin]")) return saveCheckin(f, form);
     if (f.matches("[data-note]")) {
       const text = String(form.get("note")).trim();
       if (!text) return;
@@ -482,8 +838,20 @@
     s = {
       ...original(),
       ...d,
-      loans: d.loans.map((l) => ({ ...l })),
-      notes: d.notes.map((n) => ({ ...n })),
+      proto: d.proto !== false,
+      checkin: getReq(d.checkin) ? d.checkin : "",
+      find: typeof d.find === "string" ? d.find : "",
+      loans: d.loans.map((l) => ({
+        ...l,
+        holder: people.includes(l.holder) ? l.holder : undefined,
+        log: Array.isArray(l.log)
+          ? l.log.filter((e) => e && shifts[e.phase] && typeof e.text === "string")
+          : [],
+      })),
+      notes: d.notes.map((n) => ({
+        ...n,
+        author: typeof n.author === "string" ? n.author : undefined,
+      })),
     };
     paint();
   }
